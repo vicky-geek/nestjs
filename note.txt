@@ -1,0 +1,313 @@
+================================================================================
+NESTJS TO-DO APP - LEARNING NOTES
+================================================================================
+
+Project: to-do-app
+Purpose: Learning NestJS basics (controllers, services, DTOs, validation, routing, DI)
+
+
+================================================================================
+1. PROJECT STRUCTURE (BASICS)
+================================================================================
+
+Controller  -> Handles HTTP requests (routes/endpoints)
+Service       -> Contains business logic
+Module        -> Groups controllers + services together
+DTO           -> Data Transfer Object (shape of request/response data)
+Entity        -> Database model shape (when using DB later)
+
+Flow:
+Client Request -> Controller -> Service -> Response
+
+
+================================================================================
+2. DTO (DATA TRANSFER OBJECT)
+================================================================================
+
+File: src/users/dto/create-user.dto.ts
+
+Plain TypeScript DTO (NO runtime validation):
+-------------------------------------------
+export class CreateUserDto {
+    name: string;
+    email: string;
+    password: string;
+}
+
+What it does:
+- Type safety at compile time (TypeScript only)
+- Editor autocomplete
+- Code readability
+
+What it does NOT do:
+- Does NOT validate incoming HTTP request at runtime
+- TypeScript types are removed after compilation
+
+So if password is missing in request, Nest will still accept it unless
+validation is added.
+
+
+DTO with validation (runtime validation):
+-------------------------------------------
+import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+
+export class CreateUserDto {
+  @IsString()
+  @IsNotEmpty()
+  name: string;
+
+  @IsEmail()
+  @IsNotEmpty()
+  email: string;
+
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(6)
+  password: string;
+}
+
+Required packages:
+npm install class-validator class-transformer
+
+
+================================================================================
+3. VALIDATION PIPE (main.ts)
+================================================================================
+
+File: src/main.ts
+
+app.useGlobalPipes(
+  new ValidationPipe({
+    whitelist: true,           // removes properties not defined in DTO
+    forbidNonWhitelisted: true, // throws error if extra unknown fields sent
+    transform: true,            // converts plain JSON body to DTO class instance
+  }),
+);
+
+Options explained:
+- whitelist: true        -> strips unknown fields from request body
+- forbidNonWhitelisted   -> rejects request if extra fields are sent
+- transform: true        -> converts req.body into DTO class instance
+
+Without ValidationPipe, DTO decorators do nothing at runtime.
+
+
+================================================================================
+4. req.body vs createUserDto (IMPORTANT)
+================================================================================
+
+Example request (no email sent):
+{
+  "name": "anc",
+  "password": "test525ss"
+}
+
+Result in controller:
+- req.body        -> { name: 'anc', password: 'test525ss' }   (plain object)
+- createUserDto   -> CreateUserDto { name: 'anc', email: undefined, password: 'test525ss' }
+
+Why different?
+- req.body is a plain JavaScript object (only keys that were sent)
+- createUserDto is a class instance (transform: true)
+- Class instance shows email: undefined because property exists on class but was not sent
+
+If email is optional (@IsOptional()):
+- Request passes validation even without email
+
+If email is required (@IsNotEmpty()):
+- Request fails with 400 Bad Request if email is missing
+
+
+================================================================================
+5. ROUTING & ENDPOINTS
+================================================================================
+
+Controller decorator sets base path:
+@Controller('users')  -> all routes start with /users
+@Controller('auth')   -> all routes start with /auth
+@Controller('activity') -> routes start with /activity
+
+Method decorator adds path:
+@Get()           -> GET /users
+@Post()          -> POST /users
+@Get(':id')      -> GET /users/:id  (dynamic route)
+@Get('user')     -> GET /users/user (static route)
+@Get('register') -> GET /auth/register
+
+
+Activity controller example:
+@Controller('activity')
+@Get()
+Endpoint: GET /activity
+
+Note: Being inside UsersModule does NOT change the URL.
+Only @Controller('...') path matters.
+
+
+================================================================================
+6. ROUTE ORDER (VERY IMPORTANT)
+================================================================================
+
+WRONG order (static route after dynamic):
+@Get(':id')       // matches ANYTHING including "user"
+findOne(...)
+
+@Get('user')      // never reached for /users/user
+UsingQueryParams(...)
+
+Problem:
+GET /users/user?name=abc hits findOne() with id = "user"
+Returns: "This action returns a #NaN user"
+
+
+CORRECT order (static routes BEFORE dynamic routes):
+@Get('user/byname')
+UsingQueryParams(...)
+
+@Get(':id')
+findOne(...)
+
+Rule: Always put specific/static routes BEFORE :param routes.
+
+
+================================================================================
+7. QUERY PARAMS vs BODY
+================================================================================
+
+Query params -> URL: /users/user/byname?name=abc
+Read with: @Query('name') name: string
+
+Request body -> sent in POST/PATCH/PUT with JSON
+Read with: @Body() createUserDto: CreateUserDto
+
+GET requests should use query params, NOT body.
+Many servers/clients ignore body on GET requests.
+
+Correct curl for query param:
+curl 'http://localhost:8000/users/user/byname?name=abc'
+
+Wrong (body ignored on GET):
+curl --request GET 'http://localhost:8000/users/user/byname?name=abc' \
+  --data-raw '{"name": "anc"}'
+
+
+================================================================================
+8. DEPENDENCY INJECTION - auth.controller.ts (lines 6-18)
+================================================================================
+
+File: src/auth/auth.controller.ts
+
+--- Manual instantiation (current approach in your code) ---
+
+// constructor(private readonly authService: AuthService) {}  // NestJS DI way
+
+private readonly authService: AuthService;
+constructor() {
+    this.authService = new AuthService();
+}
+
+@Get('register')
+async register() {
+    return this.authService.register();
+}
+
+What this does:
+- You manually create AuthService with: new AuthService()
+- authService is private (only accessible inside AuthController)
+- readonly means it cannot be reassigned after constructor
+
+
+--- NestJS Dependency Injection (recommended way) ---
+
+constructor(private readonly authService: AuthService) {}
+
+What NestJS does automatically:
+- Creates AuthService instance
+- Injects it into AuthController constructor
+- Manages lifecycle (singleton by default within module)
+
+
+Keywords explained:
+- private     -> only usable inside this class
+- readonly    -> cannot change reference after construction
+- injection   -> providing a dependency to a class from outside
+
+
+Why NestJS DI is better than manual new AuthService():
+1. Testability   -> easy to mock AuthService in unit tests
+2. Single instance -> Nest creates one shared instance per module
+3. Loose coupling  -> controller does not need to know how to create service
+4. Module control  -> AuthModule registers providers: [AuthService]
+
+
+AuthModule setup:
+@Module({
+  controllers: [AuthController],
+  providers: [AuthService]   // tells Nest: "create and inject this"
+})
+export class AuthModule {}
+
+
+Compare with UsersController (proper NestJS DI):
+constructor(
+  private readonly usersService: UsersService,
+  private readonly activityService: ActivityService
+) {}
+
+Nest automatically injects both services. No "new UsersService()" needed.
+
+
+================================================================================
+9. HTTP DECORATORS QUICK REFERENCE
+================================================================================
+
+@Get()              -> HTTP GET
+@Post()             -> HTTP POST
+@Patch()            -> HTTP PATCH
+@Delete()           -> HTTP DELETE
+
+@Body()             -> request body (JSON)
+@Param('id')        -> route param (/users/:id)
+@Query('name')      -> query string (?name=abc)
+@Req()              -> full Express request object
+
+
+================================================================================
+10. COMMON MISTAKES & FIXES
+================================================================================
+
+Mistake: DTO without decorators, expecting validation
+Fix: Add class-validator decorators + ValidationPipe
+
+Mistake: Sending body in GET request for query param endpoint
+Fix: Use ?name=value in URL instead
+
+Mistake: @Get(':id') before @Get('user')
+Fix: Put static routes before dynamic :param routes
+
+Mistake: new AuthService() instead of constructor injection
+Fix: Use constructor(private readonly authService: AuthService)
+
+Mistake: Expecting email in req.body when not sent
+Fix: Optional field = key missing; class instance shows undefined
+
+
+================================================================================
+11. USEFUL COMMANDS
+================================================================================
+
+npm run start:dev          -> run with hot reload
+npm install class-validator class-transformer  -> for DTO validation
+
+Test endpoints:
+curl http://localhost:8000/users
+curl http://localhost:8000/auth/register
+curl http://localhost:8000/users/user/byname?name=abc
+curl -X POST http://localhost:8000/users \
+  -H "Content-Type: application/json" \
+  -d '{"name":"anc","email":"abc@gmail.com","password":"test1234"}'
+
+
+================================================================================
+END OF NOTES
+================================================================================
