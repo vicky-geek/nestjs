@@ -18,6 +18,7 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   21    -> Quick revision cheat sheet
   22    -> Updated curl commands
   23    -> Prisma PostgreSQL connection flow on server start
+  24    -> Auth Guard (app / controller / endpoint + @Public)
   (also see DTO class vs interface section above section 13)
 
 
@@ -1034,6 +1035,240 @@ ONE-LINE SUMMARY
 On startup Nest creates PrismaService, reads DATABASE_URL, sets up pg
 Pool with Prisma adapter, then $connect() opens the pool to PostgreSQL
 before the server accepts requests.
+
+
+================================================================================
+24. AUTH GUARD - APP / CONTROLLER / ENDPOINT LEVEL + @Public()
+================================================================================
+
+File in project: src/auth/authGouard.ts
+
+What AuthGuard does:
+- Reads Authorization header: Bearer <token>
+- Verifies JWT with JwtService
+- Attaches payload to request.user
+- Throws UnauthorizedException if token missing/invalid
+
+
+--------------------------------------------------------------------------------
+LEVEL 1: ENDPOINT LEVEL (single route) — current approach in project
+--------------------------------------------------------------------------------
+
+Use @UseGuards on ONE method only.
+
+File: src/users/users.controller.ts
+
+@UseGuards(AuthGuard)
+@Get(':id')
+async findOne(@Param('id') id: string) {
+  return await this.usersService.findOne(+id);
+}
+
+Result:
+- GET /users/:id        -> protected (needs token)
+- GET /users            -> public
+- POST /users           -> public
+
+Test protected route:
+curl http://localhost:7000/users/1 \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+
+
+--------------------------------------------------------------------------------
+LEVEL 2: CONTROLLER LEVEL (all routes in one controller)
+--------------------------------------------------------------------------------
+
+Put @UseGuards on the controller class.
+
+@UseGuards(AuthGuard)
+@Controller('users')
+export class UsersController {
+
+  @Get()
+  findAll() { ... }          // protected
+
+  @Get(':id')
+  findOne() { ... }           // protected
+
+  @Post()
+  create() { ... }            // protected
+}
+
+Result: ALL routes under /users/* need JWT token.
+
+
+--------------------------------------------------------------------------------
+LEVEL 3: APP LEVEL (global — every route in entire app)
+--------------------------------------------------------------------------------
+
+Register guard globally using APP_GUARD in AppModule.
+
+Step 1: Create @Public() decorator
+-----------------------------------
+File: src/auth/decorators/public.decorator.ts
+
+import { SetMetadata } from '@nestjs/common';
+export const IS_PUBLIC_KEY = 'isPublic';
+export const Public = () => SetMetadata(IS_PUBLIC_KEY, true);
+
+
+Step 2: Update AuthGuard to skip @Public() routes
+--------------------------------------------------
+File: src/auth/authGouard.ts
+
+import { Reflector } from '@nestjs/core';
+import { IS_PUBLIC_KEY } from './decorators/public.decorator';
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  constructor(
+    private readonly jwtService: JwtService,
+    private readonly reflector: Reflector,    // add this
+  ) {}
+
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    // check if route is marked @Public()
+    const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
+      context.getHandler(),   // method level
+      context.getClass(),     // controller level
+    ]);
+
+    if (isPublic) {
+      return true;   // skip auth, allow request
+    }
+
+    // normal JWT check below...
+    const request = context.switchToHttp().getRequest();
+    const token = this.extractTokenFromHeader(request);
+    if (!token) throw new UnauthorizedException();
+    // ... verify token, set request.user
+    return true;
+  }
+}
+
+
+Step 3: Register global guard in AppModule
+------------------------------------------
+File: src/app.module.ts
+
+import { APP_GUARD } from '@nestjs/core';
+import { AuthGuard } from './auth/authGouard';
+
+@Module({
+  imports: [PrismaModule, AuthModule, UsersModule, GmailModule],
+  providers: [
+    AppService,
+    {
+      provide: APP_GUARD,
+      useClass: AuthGuard,    // applies to ALL routes
+    },
+  ],
+})
+export class AppModule {}
+
+Also ensure AuthGuard is in AuthModule providers (for DI):
+providers: [AuthService, AuthGuard]
+
+
+Step 4: Mark public endpoints with @Public()
+---------------------------------------------
+Routes that should NOT need token:
+
+File: src/auth/auth.controller.ts
+@Public()
+@Post('register')
+async register(@Body() registerDto: RegisterDto) { ... }
+
+File: src/users/users.controller.ts
+@Public()
+@Get()
+findAll() { ... }
+
+Result:
+- POST /auth/register  -> public (@Public)
+- GET /users           -> public (@Public)
+- GET /users/:id       -> protected (no @Public)
+- Everything else      -> protected by default
+
+
+--------------------------------------------------------------------------------
+GUARD LEVEL COMPARISON
+--------------------------------------------------------------------------------
+
+| Level      | Where to apply        | Scope                          |
+|------------|-----------------------|--------------------------------|
+| Endpoint   | @UseGuards on method  | One route only                 |
+| Controller | @UseGuards on class   | All routes in that controller  |
+| App        | APP_GUARD in module   | Entire application             |
+
+Recommendation:
+- Learning/small app  -> endpoint or controller level
+- Real production app -> app level + @Public() on login/register routes
+
+
+--------------------------------------------------------------------------------
+REQUEST FLOW WITH APP-LEVEL GUARD
+--------------------------------------------------------------------------------
+
+Request comes in
+  -> AuthGuard.canActivate()
+  -> Is route @Public()?  YES -> allow (no token needed)
+  -> Is route @Public()?  NO  -> check Bearer token
+  -> Token valid?  YES -> set request.user, allow
+  -> Token valid?  NO  -> 401 Unauthorized
+
+
+--------------------------------------------------------------------------------
+HOW TO ACCESS LOGGED-IN USER IN CONTROLLER
+--------------------------------------------------------------------------------
+
+After guard sets request.user, read it in handler:
+
+@Get('profile')
+getProfile(@Req() req: Request) {
+  return req['user'];   // JWT payload { email: '...' }
+}
+
+
+--------------------------------------------------------------------------------
+COMMON MISTAKES
+--------------------------------------------------------------------------------
+
+1. Global guard but forgot @Public() on /auth/register
+   -> register also requires token (wrong)
+
+2. AuthGuard not in providers
+   -> DI error: Nest can't resolve dependencies
+
+3. Forgot Reflector in AuthGuard when using @Public()
+   -> @Public() has no effect, all routes still protected
+
+4. Token format wrong
+   -> Must be: Authorization: Bearer <token>
+   -> NOT just: Authorization: <token>
+
+5. Endpoint-level @UseGuards + APP_GUARD together
+   -> Guard runs twice on that route (usually avoid duplicate)
+
+
+--------------------------------------------------------------------------------
+QUICK EXAMPLES SUMMARY
+--------------------------------------------------------------------------------
+
+# Endpoint level
+@UseGuards(AuthGuard)
+@Get(':id')
+
+# Controller level
+@UseGuards(AuthGuard)
+@Controller('users')
+
+# App level (AppModule)
+{ provide: APP_GUARD, useClass: AuthGuard }
+
+# Make public when app-level guard is on
+@Public()
+@Post('register')
 
 
 ================================================================================

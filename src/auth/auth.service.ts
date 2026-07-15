@@ -1,6 +1,7 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { GmailService } from '../gmail/gmail.service';
 import { RegisterDto } from './dto/register.dto';
+import { LoginDto } from './dto/login.dto';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
@@ -46,6 +47,39 @@ export class AuthService {
         email: user.email,
       },
       email: emailResult,
+      token,
+      refreshToken,
+    };
+  }
+
+  async login(loginDto: LoginDto) {
+    const user = await this.prisma.user.findUnique({
+      where: { email: loginDto.email },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    const isPasswordValid = await bcrypt.compare(loginDto.password, user.password);
+
+    if (!isPasswordValid) {
+      throw new UnauthorizedException('Invalid email or password');
+    }
+
+    const token = await this.jwtService.signAsync({ email: user.email });
+    const refreshToken = await this.jwtService.signAsync(
+      { email: user.email },
+      { secret: process.env.JWT_REFRESH_SECRET, expiresIn: '7d' },
+    );
+
+    return {
+      message: 'Login successful',
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+      },
       token,
       refreshToken,
     };
