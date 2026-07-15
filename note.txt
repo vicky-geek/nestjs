@@ -5,6 +5,21 @@ NESTJS TO-DO APP - LEARNING NOTES
 Project: to-do-app
 Purpose: Learning NestJS basics (controllers, services, DTOs, validation, routing, DI)
 
+REVISION INDEX (Q&A sections marked with "Q&A"):
+  1-12  -> Core concepts (DTO, ValidationPipe, routing, DI, Gmail module)
+  13    -> Password not required without validation
+  14    -> Use of plain DTO without decorators
+  15    -> dotenv vs @nestjs/config
+  16    -> Prisma DB configuration (Prisma 7)
+  17    -> Prisma TypeScript errors fix
+  18    -> PostgreSQL password connection error
+  19    -> JWT expiresIn module vs inline override
+  20    -> sign() vs signAsync()
+  21    -> Quick revision cheat sheet
+  22    -> Updated curl commands
+  23    -> Prisma PostgreSQL connection flow on server start
+  (also see DTO class vs interface section above section 13)
+
 
 ================================================================================
 1. PROJECT STRUCTURE (BASICS)
@@ -639,6 +654,386 @@ So they cannot be used for runtime features.
 
 
 
+
+
+================================================================================
+13. Q&A: Why does API work without password when DTO has password field?
+================================================================================
+
+Q: I sent only name and email, no password. Why did Nest accept the request?
+
+A: Plain TypeScript DTO fields are compile-time only. Without class-validator
+decorators AND ValidationPipe, Nest does not validate at runtime.
+
+Fix:
+- Add @IsNotEmpty(), @MinLength(6) on password in DTO
+- Enable ValidationPipe in main.ts
+- npm install class-validator class-transformer
+
+
+================================================================================
+14. Q&A: What is the use of DTO without decorators?
+================================================================================
+
+Q: If DTO does not validate, what is it for?
+
+A: Without decorators it only gives:
+- TypeScript type safety (compile time)
+- Autocomplete in IDE
+- Code readability / contract documentation
+
+It does NOT block invalid requests at runtime.
+
+
+================================================================================
+15. Q&A: dotenv vs @nestjs/config
+================================================================================
+
+Q: Nest docs say use @nestjs/config for env vars. Why does dotenv work for me?
+
+A: dotenv.config() loads .env into global process.env. Any file can then read
+process.env.PORT — including services.
+
+dotenv alone:
+  .env -> process.env -> process.env.PORT anywhere
+
+@nestjs/config (recommended for bigger apps):
+  .env -> ConfigModule -> ConfigService (injectable, validated, testable)
+
+dotenv works because you call it in main.ts before app starts.
+@nestjs/config is better for DI, validation, and clean architecture — not
+because dotenv is wrong.
+
+
+================================================================================
+16. Q&A: Prisma database configuration (Prisma 7 + NestJS)
+================================================================================
+
+Q: How to configure DB with Prisma in this project?
+
+A: Key files:
+
+prisma/schema.prisma
+--------------------
+generator client {
+  provider     = "prisma-client"
+  output       = "../generated/prisma"
+  moduleFormat = "cjs"          // required for NestJS (CommonJS)
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  name      String
+  email     String   @unique
+  password  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+.env
+----
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@localhost:5432/todo_db?schema=public
+
+src/prisma/prisma.service.ts
+----------------------------
+import { PrismaClient } from '../../generated/prisma/client';
+import { PrismaPg } from '@prisma/adapter-pg';
+import { Pool } from 'pg';
+
+// Prisma 7 requires driver adapter for PostgreSQL
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const adapter = new PrismaPg(pool);
+super({ adapter });
+
+Commands:
+npm install @prisma/adapter-pg pg
+npm run prisma:generate
+npm run prisma:migrate
+
+
+================================================================================
+17. Q&A: Prisma errors - Property 'user' does not exist / Cannot find module
+================================================================================
+
+Q: Got errors like:
+- Property 'user' does not exist on type 'PrismaService'
+- Cannot find module '../../generated/prisma'
+
+A: Causes and fixes:
+
+1. Wrong import path (Prisma 7):
+   WRONG: import { PrismaClient } from '../../generated/prisma'
+   RIGHT: import { PrismaClient } from '../../generated/prisma/client'
+
+2. No User model in schema.prisma when client was generated
+   Fix: Add model User, then run npm run prisma:generate
+
+3. Prisma 7 needs adapter (not just connection string in super())
+   Fix: Use @prisma/adapter-pg + pg Pool
+
+4. Add moduleFormat = "cjs" in generator for NestJS compatibility
+
+
+================================================================================
+18. Q&A: PostgreSQL error - client password must be a string
+================================================================================
+
+Q: Error: SASL: SCRAM-SERVER-FIRST-MESSAGE: client password must be a string
+
+A: DATABASE_URL is missing password or password is undefined.
+
+WRONG:
+DATABASE_URL=postgresql://postgres@localhost:5432/todo_db
+
+RIGHT (with password):
+DATABASE_URL=postgresql://postgres:123456@localhost:5432/todo_db?schema=public
+
+RIGHT (empty password — note colon after username):
+DATABASE_URL=postgresql://postgres:@localhost:5432/todo_db?schema=public
+
+Format: postgresql://USERNAME:PASSWORD@HOST:PORT/DATABASE?schema=public
+
+Also ensure dotenv loads early in main.ts:
+import 'dotenv/config';
+
+
+================================================================================
+19. Q&A: JWT expiresIn in module vs sign/signAsync options
+================================================================================
+
+Q: JwtModule already has expiresIn. Do I need expiresIn again in sign/signAsync?
+
+A: Module config is the DEFAULT. Inline options OVERRIDE for that token only.
+
+AuthModule:
+JwtModule.register({
+  secret: process.env.JWT_SECRET,
+  signOptions: { expiresIn: '60s' },   // default for all sign/signAsync calls
+})
+
+Access token (uses module default):
+const token = this.jwtService.sign({ email: user.email });
+// secret: JWT_SECRET, expiresIn: 60s
+
+Refresh token (overrides defaults):
+const refreshToken = this.jwtService.sign(
+  { email: user.email },
+  { secret: process.env.JWT_REFRESH_SECRET, expiresIn: '7d' },
+);
+// different secret + different expiry
+
+If you remove expiresIn from refresh token call, it would expire in 60s too.
+
+
+================================================================================
+20. Q&A: Why use signAsync? Is JWT async like DB calls?
+================================================================================
+
+Q: Why signAsync? In Express jwt.sign is sync, not a Promise.
+
+A: Correct. JWT signing is synchronous. NestJS gives BOTH options:
+
+sign()      -> sync, returns string immediately (like Express)
+signAsync() -> returns Promise<string> (optional wrapper)
+
+Express:
+const token = jwt.sign(payload, secret, { expiresIn: '1h' });
+
+NestJS (same idea):
+const token = this.jwtService.sign({ email: user.email });
+
+signAsync is NOT required. Use it only if you prefer await style.
+
+Truly async in register():
+- await bcrypt.hash()
+- await prisma.user.create()
+
+JWT sign() does not need await.
+
+
+================================================================================
+21. Q&A QUICK REVISION CHEAT SHEET
+================================================================================
+
+Topic                          | Remember
+-------------------------------|------------------------------------------
+DTO validation                 | decorators + ValidationPipe required
+Plain DTO                      | types only, no runtime check
+req.body vs DTO                | plain object vs class instance
+Optional field                 | missing in body, undefined in DTO
+Route order                    | static routes before :id routes
+GET + body                     | use query params, not body
+Module path                    | only @Controller() sets URL
+DI                             | constructor(private readonly service)
+Module export/import           | export service, import module
+dotenv                         | loads process.env globally
+@nestjs/config                 | Nest way, injectable ConfigService
+Prisma 7 import                | from '../../generated/prisma/client'
+Prisma 7 adapter               | @prisma/adapter-pg + pg Pool
+DATABASE_URL                   | must include password as string
+JWT module expiresIn           | default for all tokens
+JWT inline expiresIn           | overrides for that token only
+jwtService.sign()              | sync like Express
+jwtService.signAsync()         | optional Promise version
+
+
+================================================================================
+22. USEFUL CURL COMMANDS (UPDATED)
+================================================================================
+
+# Register user (saves to DB + JWT + email)
+curl -X POST http://localhost:7000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"name":"John","email":"john@example.com","password":"test1234"}'
+
+# Query param route
+curl 'http://localhost:7000/users/user/byname?name=abc'
+
+# Create user
+curl -X POST http://localhost:7000/users \
+  -H "Content-Type: application/json" \
+  -d '{"name":"anc","email":"abc@gmail.com","password":"test1234"}'
+
+# Prisma Studio (view DB data)
+npm run prisma:studio
+
+
+================================================================================
+23. Q&A: Prisma PostgreSQL connection flow when server starts
+================================================================================
+
+Q: How does Prisma connect to PostgreSQL when we start the NestJS server?
+
+A: Step-by-step flow in this project:
+
+BIG PICTURE
+-----------
+npm run start:dev
+  -> main.ts loads .env
+  -> NestJS creates AppModule
+  -> PrismaModule creates PrismaService
+  -> PrismaService builds pg Pool + Prisma adapter
+  -> onModuleInit() calls $connect()
+  -> Server ready, DB queries work on API calls
+
+
+STEP 1: Server starts (main.ts)
+--------------------------------
+import 'dotenv/config';          // loads DATABASE_URL from .env
+const app = await NestFactory.create(AppModule);
+
+At this point Postgres is NOT connected yet.
+
+
+STEP 2: Nest loads modules (app.module.ts)
+-------------------------------------------
+imports: [PrismaModule, AuthModule, UsersModule, GmailModule]
+
+Nest bootstraps PrismaModule first among imports.
+
+
+STEP 3: PrismaModule registers PrismaService
+---------------------------------------------
+@Global()  -> PrismaService available in ALL modules
+providers: [PrismaService]  -> Nest creates one singleton instance
+
+
+STEP 4: PrismaService constructor runs
+---------------------------------------
+const connectionString = process.env.DATABASE_URL;
+const pool = new Pool({ connectionString });   // pg connection pool
+const adapter = new PrismaPg(pool);            // Prisma 7 adapter
+super({ adapter });                            // init PrismaClient
+
+DATABASE_URL example:
+postgresql://postgres:123456@localhost:5432/todo_db?schema=public
+
+Parsed as:
+- User: postgres
+- Password: 123456
+- Host: localhost
+- Port: 5432
+- Database: todo_db
+
+Pool is configured here, but not fully connected yet.
+
+
+STEP 5: onModuleInit() - actual DB connection
+------------------------------------------------
+async onModuleInit() {
+  await this.$connect();
+}
+
+Nest calls this after all modules initialize.
+$connect() opens the pool and verifies PostgreSQL is reachable.
+If password/DB is wrong, server startup fails here.
+
+
+STEP 6: Server listens
+-----------------------
+await app.listen(process.env.PORT ?? 3000);
+
+Server is ready. Connection pool is alive.
+
+
+STEP 7: API request uses Prisma (example: register)
+----------------------------------------------------
+POST /auth/register
+  -> AuthController
+  -> AuthService
+  -> this.prisma.user.findUnique()
+  -> this.prisma.user.create()
+  -> SQL sent via pg Pool to PostgreSQL
+  -> result returned
+
+
+STEP 8: Server shutdown
+------------------------
+async onModuleDestroy() {
+  await this.$disconnect();
+  await this.pool.end();
+}
+
+On Ctrl+C: Prisma disconnects and pool closes all DB connections.
+
+
+BUILD TIME vs RUNTIME (important)
+----------------------------------
+| File               | When used                          |
+|--------------------|------------------------------------|
+| schema.prisma      | prisma generate / prisma migrate   |
+| prisma.config.ts   | Prisma CLI only (not runtime app)  |
+| .env DATABASE_URL  | Runtime when server starts         |
+| PrismaService      | Runtime on every DB query          |
+
+Build time (once):
+  schema.prisma -> prisma generate -> generated/prisma/client
+                -> prisma migrate  -> creates User table in DB
+
+Runtime (every server start):
+  .env DATABASE_URL -> PrismaService -> PostgreSQL
+
+
+VISUAL TIMELINE
+---------------
+[1] dotenv loads .env
+[2] NestFactory.create(AppModule)
+[3] PrismaService constructor (Pool + adapter created)
+[4] onModuleInit -> $connect()  <- DB CONNECTED
+[5] app.listen()                <- SERVER READY
+[6] POST /auth/register -> prisma.user.create() -> PostgreSQL
+[7] Ctrl+C -> onModuleDestroy -> disconnect
+
+
+ONE-LINE SUMMARY
+----------------
+On startup Nest creates PrismaService, reads DATABASE_URL, sets up pg
+Pool with Prisma adapter, then $connect() opens the pool to PostgreSQL
+before the server accepts requests.
 
 
 ================================================================================

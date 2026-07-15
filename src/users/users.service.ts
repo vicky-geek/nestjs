@@ -1,9 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
-
+import { PrismaService } from '../prisma/prisma.service';
 @Injectable()
 export class UsersService {
+  constructor(private readonly prisma: PrismaService) {}
+
   UsingQueryParams(name: string) {
     return {"message": "Users fetched successfully","data":[{"id":1,"name":name,"email":"john.doe@example.com","password":"123456"}]};
   }
@@ -18,8 +20,17 @@ export class UsersService {
     return {"message": "Users fetched successfully","data":[{"id":1,"name":"John Doe","email":"john.doe@example.com","password":"123456"}]};
   }
 
-  findOne(id: number) {
-    return `This action returns a #${id} user`;
+  async findOne(id: number) {
+    try {
+      const user = await this.prisma.user.findUnique({
+      where: {
+        id: id,
+        },
+      });
+      return user;
+    } catch (error) {
+      throw new Error(error);
+    }
   }
 
   update(id: number, updateUserDto: UpdateUserDto) {
