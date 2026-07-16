@@ -19,6 +19,9 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   22    -> Updated curl commands
   23    -> Prisma PostgreSQL connection flow on server start
   24    -> Auth Guard (app / controller / endpoint + @Public)
+  25    -> Prisma relations (User, Profile, Todo, Comment, Tag)
+  26    -> Prisma migrate: rename columns + production migrate
+  27    -> Failed migration recovery (local vs production)
   (also see DTO class vs interface section above section 13)
 
 
@@ -1269,6 +1272,847 @@ QUICK EXAMPLES SUMMARY
 # Make public when app-level guard is on
 @Public()
 @Post('register')
+
+
+================================================================================
+25. PRISMA RELATIONS - User, Profile, Todo, Comment, Tag
+================================================================================
+
+Models added in prisma/schema.prisma for the to-do app.
+
+
+--------------------------------------------------------------------------------
+RELATION DIAGRAM (how tables connect)
+--------------------------------------------------------------------------------
+
+User (1) -------- (1) Profile
+  |
+  | (1)
+  |
+  * (many)
+Todo (1) -------- * (many) Comment
+  |                      ^
+  |                      |
+  | (many)               | (many)
+  |                      |
+  * -------------------- User (author of comment)
+
+Todo (many) -------- (many) Tag
+         via TodoTag (junction table)
+
+
+Real-world meaning:
+- One User has ONE Profile (bio, avatar)
+- One User has MANY Todos
+- One Todo has MANY Comments
+- One User can write MANY Comments (on different todos)
+- One Todo can have MANY Tags (work, urgent, home...)
+- One Tag can be on MANY Todos (shared labels)
+
+
+--------------------------------------------------------------------------------
+RELATION TYPES EXPLAINED
+--------------------------------------------------------------------------------
+
+1) ONE-TO-ONE: User <-> Profile
+--------------------------------
+model User {
+  profile Profile?    // optional: user may not have profile yet
+}
+
+model Profile {
+  userId Int    @unique    // unique = only ONE profile per user
+  user   User   @relation(fields: [userId], references: [id])
+}
+
+How it works:
+- Profile table stores userId (foreign key)
+- @unique on userId enforces 1:1
+- User.id = 1  ->  Profile.userId = 1 (only one row)
+
+
+2) ONE-TO-MANY: User -> Todo
+-----------------------------
+model User {
+  todos Todo[]
+}
+
+model Todo {
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+}
+
+How it works:
+- Todo stores userId (who owns this todo)
+- User does NOT store todo ids
+- User id=1 can have Todo userId=1, userId=1, userId=1 (many rows)
+
+
+3) ONE-TO-MANY: Todo -> Comment
+--------------------------------
+model Todo {
+  comments Comment[]
+}
+
+model Comment {
+  todoId Int
+  todo   Todo @relation(fields: [todoId], references: [id])
+  userId Int
+  user   User @relation(fields: [userId], references: [id])
+}
+
+How it works:
+- Each comment belongs to ONE todo (todoId)
+- Each comment also has ONE author (userId)
+- Todo id=5 can have many comments with todoId=5
+
+
+4) MANY-TO-MANY: Todo <-> Tag (via TodoTag)
+--------------------------------------------
+model Todo {
+  tags TodoTag[]
+}
+
+model Tag {
+  todos TodoTag[]
+}
+
+model TodoTag {
+  todoId Int
+  tagId  Int
+  todo   Todo @relation(...)
+  tag    Tag  @relation(...)
+  @@id([todoId, tagId])    // composite primary key
+}
+
+Why junction table?
+- SQL cannot store array of tag ids directly in Todo row (normalized way)
+- TodoTag row = one link: todo 3 has tag 7
+
+Example data:
+TodoTag { todoId: 1, tagId: 1 }   // Todo "Buy milk" -> Tag "home"
+TodoTag { todoId: 1, tagId: 2 }   // Todo "Buy milk" -> Tag "urgent"
+TodoTag { todoId: 2, tagId: 2 }   // Todo "Fix bug"  -> Tag "urgent"
+
+
+--------------------------------------------------------------------------------
+FOREIGN KEY + onDelete: Cascade
+--------------------------------------------------------------------------------
+
+user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+- fields: [userId]     -> column in THIS table
+- references: [id]     -> column in PARENT table (User.id)
+- onDelete: Cascade    -> if User deleted, delete related Todos/Profile too
+
+Without Cascade: delete User would fail if todos still exist.
+
+
+--------------------------------------------------------------------------------
+PRISMA QUERY EXAMPLES (how to use relations in code)
+--------------------------------------------------------------------------------
+
+1) Create user with profile (nested create)
+-------------------------------------------
+await prisma.user.create({
+  data: {
+    name: 'John',
+    email: 'john@example.com',
+    password: hashedPassword,
+    profile: {
+      create: {
+        bio: 'Hello, I am John',
+        avatar: 'https://example.com/avatar.png',
+      },
+    },
+  },
+  include: { profile: true },
+});
+
+
+2) Create todo for a user
+--------------------------
+await prisma.todo.create({
+  data: {
+    title: 'Learn NestJS',
+    description: 'Study relations',
+    userId: 1,
+  },
+});
+
+// or connect by relation:
+await prisma.todo.create({
+  data: {
+    title: 'Learn NestJS',
+    user: { connect: { id: 1 } },
+  },
+});
+
+
+3) Get user with profile and todos
+-----------------------------------
+await prisma.user.findUnique({
+  where: { id: 1 },
+  include: {
+    profile: true,
+    todos: true,
+  },
+});
+
+Returns:
+{
+  id: 1,
+  name: 'John',
+  profile: { bio: '...', avatar: '...' },
+  todos: [ { id: 1, title: '...' }, ... ]
+}
+
+
+4) Add comment to todo
+-----------------------
+await prisma.comment.create({
+  data: {
+    content: 'Great task!',
+    todo: { connect: { id: 5 } },
+    user: { connect: { id: 1 } },
+  },
+});
+
+
+5) Get todo with comments, tags, and author
+---------------------------------------------
+await prisma.todo.findUnique({
+  where: { id: 5 },
+  include: {
+    user: true,
+    comments: {
+      include: { user: true },   // comment author name
+    },
+    tags: {
+      include: { tag: true },     // actual Tag name via junction
+    },
+  },
+});
+
+
+6) Add tags to todo (many-to-many)
+-----------------------------------
+await prisma.todo.update({
+  where: { id: 1 },
+  data: {
+    tags: {
+      create: [
+        { tag: { connectOrCreate: { where: { name: 'work' }, create: { name: 'work' } } } },
+        { tag: { connectOrCreate: { where: { name: 'urgent' }, create: { name: 'urgent' } } } },
+      ],
+    },
+  },
+});
+
+
+7) Find all todos with tag "urgent"
+------------------------------------
+await prisma.todo.findMany({
+  where: {
+    tags: {
+      some: {
+        tag: { name: 'urgent' },
+      },
+    },
+  },
+  include: { tags: { include: { tag: true } } },
+});
+
+
+--------------------------------------------------------------------------------
+TABLE SUMMARY
+--------------------------------------------------------------------------------
+
+| Model   | Foreign keys        | Relation type        |
+|---------|---------------------|----------------------|
+| Profile | userId -> User.id   | 1:1 with User        |
+| Todo    | userId -> User.id   | many:1 with User     |
+| Comment | todoId, userId      | many:1 Todo + User   |
+| TodoTag | todoId, tagId       | junction (M:N)       |
+| Tag     | (none)              | M:N with Todo        |
+
+
+--------------------------------------------------------------------------------
+MIGRATION COMMANDS (after schema change)
+--------------------------------------------------------------------------------
+
+npm run prisma:generate
+npm run prisma:migrate
+# migration name example: add_todo_profile_comment_tag
+
+npm run prisma:studio    # visually inspect tables and relations
+
+
+--------------------------------------------------------------------------------
+NESTJS USAGE TIP (next step)
+--------------------------------------------------------------------------------
+
+Typical module structure for learning:
+- users module     -> User + Profile
+- todos module     -> Todo CRUD
+- comments module  -> Comment on todos
+- tags module      -> Tag + assign to todos
+
+Service uses PrismaService:
+this.prisma.todo.create({ data: { ... } })
+this.prisma.user.findUnique({ include: { profile: true, todos: true } })
+
+
+================================================================================
+26. PRISMA MIGRATE - RENAME COLUMNS + PRODUCTION
+================================================================================
+
+Your current script:
+  npm run prisma:migrate  ->  prisma migrate dev
+
+Use this ONLY in development (local machine).
+
+
+--------------------------------------------------------------------------------
+Q: If I rename a column in the model, does migrate delete old and create new?
+--------------------------------------------------------------------------------
+
+A: YES — by default Prisma does NOT truly "rename".
+
+Example: change User.name -> User.fullName in schema.prisma
+
+What Prisma usually generates in migration.sql:
+
+  ALTER TABLE "User" DROP COLUMN "name";
+  ALTER TABLE "User" ADD COLUMN "fullName" TEXT NOT NULL;
+
+Result:
+- Old column is DROPPED
+- New column is ADDED
+- ALL DATA in "name" is LOST
+
+Why?
+Prisma compares old schema vs new schema. It sees:
+- "name" disappeared
+- "fullName" appeared
+It does NOT know you meant rename. It thinks: delete one, add another.
+
+
+--------------------------------------------------------------------------------
+HOW TO RENAME SAFELY (keep data)
+--------------------------------------------------------------------------------
+
+Option A: Edit migration.sql before applying (best for learning)
+
+1. Change schema.prisma: name -> fullName
+2. Run: npx prisma migrate dev --create-only --name rename_name_to_fullname
+   (--create-only = create SQL file but DO NOT apply yet)
+3. Open prisma/migrations/.../migration.sql
+4. Replace DROP + ADD with:
+
+   ALTER TABLE "User" RENAME COLUMN "name" TO "fullName";
+
+5. Apply: npx prisma migrate dev
+
+
+Option B: Use @map (keep DB column name, change Prisma field name)
+
+model User {
+  fullName String @map("name")   // Prisma uses fullName, DB still "name"
+}
+
+No data loss. DB column stays "name". Only TypeScript field name changes.
+
+
+--------------------------------------------------------------------------------
+OTHER DANGEROUS CHANGES (data loss risk)
+--------------------------------------------------------------------------------
+
+| Schema change              | Prisma usually does        | Data risk     |
+|----------------------------|----------------------------|---------------|
+| Rename field               | DROP + ADD                 | HIGH - lost   |
+| Change type (String->Int)  | DROP + ADD or cast fail    | HIGH          |
+| Remove field               | DROP COLUMN                | HIGH - lost   |
+| Add optional field         | ADD COLUMN (nullable)      | Low           |
+| Add required field         | ADD with DEFAULT or fail   | Medium        |
+| Add new model              | CREATE TABLE               | Safe          |
+
+
+Always REVIEW migration.sql before applying when you have real data.
+
+
+--------------------------------------------------------------------------------
+DEV vs PROD COMMANDS
+--------------------------------------------------------------------------------
+
+| Command                    | Environment | What it does                          |
+|----------------------------|-------------|---------------------------------------|
+| prisma migrate dev         | LOCAL DEV   | Creates + applies migration, prompts  |
+| prisma migrate deploy      | PRODUCTION  | Applies pending migrations only       |
+| prisma migrate status      | Both        | Shows which migrations are applied    |
+| prisma db push             | Prototyping | Sync schema without migration history |
+
+NEVER use "prisma migrate dev" in production.
+NEVER use "prisma db push" in production.
+
+
+Your package.json scripts:
+  npm run prisma:migrate         -> migrate dev  (local)
+  npm run prisma:migrate:deploy  -> migrate deploy (production)
+
+
+--------------------------------------------------------------------------------
+PRODUCTION MIGRATION FLOW
+--------------------------------------------------------------------------------
+
+1. LOCAL (developer machine)
+   - Edit prisma/schema.prisma
+   - Run: npm run prisma:migrate
+   - Review generated migration.sql
+   - If rename: edit SQL to use RENAME COLUMN
+   - Commit BOTH:
+       prisma/schema.prisma
+       prisma/migrations/...
+
+2. CI / SERVER (production)
+   - Pull latest code
+   - Set DATABASE_URL to production DB
+   - Run: npm run prisma:migrate:deploy
+   - Then: npm run prisma:generate  (or generate during build)
+   - Then: start/restart NestJS app
+
+Example production deploy steps:
+  npm ci
+  npx prisma migrate deploy
+  npx prisma generate
+  npm run build
+  npm run start:prod
+
+
+--------------------------------------------------------------------------------
+WHY migrate deploy (not migrate dev) IN PRODUCTION?
+--------------------------------------------------------------------------------
+
+migrate dev:
+  - Interactive (asks for migration name)
+  - Can reset DB / shadow database
+  - Creates NEW migration files
+  - Unsafe for live users/data
+
+migrate deploy:
+  - Non-interactive (CI friendly)
+  - Only applies EXISTING migration files from prisma/migrations/
+  - Does NOT create new migrations
+  - Safe for production
+
+
+--------------------------------------------------------------------------------
+SAFE CHECKLIST BEFORE PROD MIGRATE
+--------------------------------------------------------------------------------
+
+1. Backup production database first
+2. Test migration on staging DB that has copy of prod data
+3. Review every migration.sql (especially DROP COLUMN)
+4. Prefer RENAME COLUMN over DROP + ADD for renames
+5. Run migrate deploy during low-traffic window if possible
+6. Keep app code and migration compatible (deploy order matters)
+
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+Renaming a field in Prisma schema usually = DROP old column + ADD new column
+(data lost) unless you manually edit migration.sql to RENAME COLUMN.
+In production use: prisma migrate deploy (never migrate dev).
+
+
+================================================================================
+END OF NOTES
+================================================================================
+
+
+if in local wants to same think  like  (not want to delete old column) ?
+
+Yes, your understanding is correct. Let's go through the sequence carefully.
+
+---
+
+# Step 1: Current Database
+
+Suppose your database has:
+
+```text
+User
+--------------------
+id
+name
+email
+```
+
+And your `schema.prisma` is:
+
+```prisma
+model User {
+  id    Int    @id @default(autoincrement())
+  name  String
+  email String
+}
+```
+
+---
+
+# Step 2: Rename in `schema.prisma`
+
+You change:
+
+```prisma
+name String
+```
+
+to
+
+```prisma
+fullName String
+```
+
+Now your schema becomes:
+
+```prisma
+model User {
+  id       Int    @id @default(autoincrement())
+  fullName String
+  email    String
+}
+```
+
+At this point:
+
+* ✅ Database still has `name`
+* ✅ Schema has `fullName`
+
+They are different.
+
+---
+
+# Step 3: Run `--create-only`
+
+```bash
+npx prisma migrate dev --create-only --name rename_name_to_fullname
+```
+
+What Prisma does:
+
+```
+Compare
+
+schema.prisma
+        ↓
+Current database
+        ↓
+Generate SQL migration
+        ↓
+Save migration.sql
+        ↓
+STOP
+```
+
+It **does not execute** the SQL.
+
+So yes, **`migration.sql` is generated before anything is applied**.
+
+For example, Prisma might generate:
+
+```sql
+ALTER TABLE "User"
+DROP COLUMN "name";
+
+ALTER TABLE "User"
+ADD COLUMN "fullName" TEXT NOT NULL;
+```
+
+This file is now sitting on disk in:
+
+```
+prisma/
+└── migrations/
+    └── 20260716103000_rename_name_to_fullname/
+        └── migration.sql
+```
+
+---
+
+# Step 4: Edit the SQL
+
+Open `migration.sql` and replace:
+
+```sql
+ALTER TABLE "User"
+DROP COLUMN "name";
+
+ALTER TABLE "User"
+ADD COLUMN "fullName" TEXT NOT NULL;
+```
+
+with
+
+```sql
+ALTER TABLE "User"
+RENAME COLUMN "name" TO "fullName";
+```
+
+Now the migration preserves the existing data.
+
+---
+
+# Step 5: Apply the migration
+
+Run:
+
+```bash
+npx prisma migrate dev
+```
+
+Now Prisma executes **your edited SQL**, not the original generated SQL.
+
+Result:
+
+Before:
+
+| id | name |
+| -- | ---- |
+| 1  | John |
+
+After:
+
+| id | fullName |
+| -- | -------- |
+| 1  | John     |
+
+No data is lost.
+
+---
+
+# What about Production?
+
+The approach is similar, but you **do not use `migrate dev` in production**.
+
+Typical workflow:
+
+### On your development machine
+
+1. Change `schema.prisma`.
+2. Run:
+
+```bash
+npx prisma migrate dev --create-only --name rename_name_to_fullname
+```
+
+3. Edit `migration.sql`.
+4. Test it locally.
+5. Commit both:
+
+   * Updated `schema.prisma`
+   * `prisma/migrations/.../migration.sql`
+
+to Git.
+
+---
+
+### On the production server
+
+You deploy your code, then run:
+
+```bash
+npx prisma migrate deploy
+```
+
+`migrate deploy`:
+
+* Reads the committed migration files.
+* Executes them in order.
+* Does **not** generate new migrations.
+* Does **not** ask questions.
+* Is designed specifically for production.
+
+---
+
+# Why not run `migrate dev` in production?
+
+Because `migrate dev` is a **development command**. It can:
+
+* Create new migrations.
+* Reset the database in some situations.
+* Perform development-only checks.
+
+Production should use:
+
+```bash
+npx prisma migrate deploy
+```
+
+which only applies existing, tested migrations.
+
+---
+
+# Development vs Production
+
+| Development                        | Production                  |
+| ---------------------------------- | --------------------------- |
+| Edit `schema.prisma`               | Pull latest code from Git   |
+| `prisma migrate dev --create-only` | No new migration generation |
+| Edit `migration.sql`               | Use the committed migration |
+| Test locally                       | `prisma migrate deploy`     |
+| Commit migration to Git            | Apply the tested migration  |
+
+So yes, your understanding is right: **`--create-only` generates `migration.sql` first, giving you a chance to edit it before anything touches the database.** In production, you don't generate or edit migrations—you apply the already-reviewed migration files that were created and tested during development.
+
+
+
+
+npm run prisma:migrate
+
+> to-do-app@0.0.1 prisma:migrate
+> prisma migrate dev
+
+Loaded Prisma config from prisma.config.ts.
+
+Prisma schema loaded from prisma/schema.prisma.
+Datasource "db": PostgreSQL database "todo_db", schema "public" at "localhost:5432"
+
+
+Error: 
+⚠️ We found changes that cannot be executed:
+
+  • Step 0 Added the required column `fullName` to the `User` table without a default value. There are 2 rows in this table, it is not possible to execute this step.
+
+You can use prisma migrate dev --create-only to create the migration file, and manually modify it to address the underlying issue(s).
+Then run prisma migrate dev to apply it and verify it works.
+
+
+
+
+command for create only migrastion file
+npx prisma migrate dev --create-only --name rename_name_to_fullname
+
+================================================================================
+27. IF MIGRATION FAILS IN PRODUCTION (NEVER RESET)
+================================================================================
+
+Same error as local (failed migration / modified after applied)?
+
+LOCAL DEV:
+  npx prisma migrate reset     <- OK for learning (DELETES ALL DATA)
+
+PRODUCTION:
+  NEVER run prisma migrate reset
+  NEVER run prisma migrate dev
+  NEVER drop the whole database
+
+
+--------------------------------------------------------------------------------
+WHY reset is forbidden in production
+--------------------------------------------------------------------------------
+
+migrate reset:
+  - DROPS entire schema
+  - Deletes ALL user data
+  - Recreates from scratch
+
+On local learning DB: fine
+On production: catastrophic (lost customers/orders/users)
+
+
+--------------------------------------------------------------------------------
+HOW TO RECOVER IN PRODUCTION
+--------------------------------------------------------------------------------
+
+Step 1: STOP / don't keep redeploying blindly
+---------------------------------------------
+Do not run migrate deploy again until you understand DB state.
+
+
+Step 2: Check status
+--------------------
+npx prisma migrate status
+
+
+Step 3: Inspect the real database
+----------------------------------
+Check what columns actually exist now.
+Example for User table:
+  - Does "name" still exist?
+  - Does "fullName" already exist?
+  - Is data still there?
+
+Use:
+  psql / Prisma Studio / SQL client
+
+
+Step 4: Fix the DATABASE manually if needed
+-------------------------------------------
+Make DB reach the intended final state safely.
+
+Example rename recovery (if rename never finished):
+  ALTER TABLE "User" RENAME COLUMN "name" TO "fullName";
+
+If fullName was added empty and name still exists:
+  UPDATE "User" SET "fullName" = "name" WHERE "fullName" IS NULL;
+  ALTER TABLE "User" DROP COLUMN "name";
+  -- then ensure fullName is NOT NULL if required
+
+
+Step 5: Mark migration as resolved in Prisma history
+----------------------------------------------------
+After DB is correct, tell Prisma the failed migration is done:
+
+  npx prisma migrate resolve --applied 20260716054200_rename_name_to_fullname
+
+If migration was wrong and you want to mark it rolled back:
+  npx prisma migrate resolve --rolled-back 20260716054200_rename_name_to_fullname
+
+Then create a NEW fixed migration in DEV, commit it, and deploy that.
+
+
+Step 6: Continue
+----------------
+npx prisma migrate status
+npx prisma migrate deploy
+
+
+--------------------------------------------------------------------------------
+ABOUT "modified after it was applied"
+--------------------------------------------------------------------------------
+
+In production you should NEVER edit an already-applied migration file in Git
+and redeploy.
+
+Rule:
+  - Once a migration is applied anywhere important -> treat SQL as IMMUTABLE
+  - Need a fix? Create a NEW migration
+  - Do not rewrite old migration.sql
+
+
+--------------------------------------------------------------------------------
+BEST PRACTICE TO AVOID THIS IN PRODUCTION
+--------------------------------------------------------------------------------
+
+1. Always use --create-only for risky changes (rename, drop, type change)
+2. Edit SQL carefully (RENAME COLUMN, backfill data)
+3. Test on staging DB with copy of prod data
+4. Backup production DB before migrate deploy
+5. Deploy during low traffic
+6. Keep migrate deploy in CI/CD as a controlled step
+
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+Local failed migration -> migrate reset is OK.
+Production failed migration -> fix DB data/columns manually +
+prisma migrate resolve --applied/--rolled-back.
+NEVER reset production.
 
 
 ================================================================================
