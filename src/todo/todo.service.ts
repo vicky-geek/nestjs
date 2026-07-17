@@ -6,6 +6,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 export class TodoService {
     constructor(private readonly prisma: PrismaService) {}
     async createTodo(userId: number, createTodoDto: CreateTodoDto) {
+        console.log('createTodo', userId, createTodoDto);
         const user = await this.prisma.user.findUnique({
             where: {
                 id: userId,

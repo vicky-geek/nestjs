@@ -23,6 +23,7 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   26    -> Prisma migrate: rename columns + production migrate
   27    -> Failed migration recovery (local vs production)
   28    -> AuthGuard without exports (why @UseGuards still works)
+  29    -> Middleware (global vs specific route) + middleware vs guard
   (also see DTO class vs interface section above section 13)
 
 
@@ -2490,6 +2491,178 @@ ONE-LINE SUMMARY
 @UseGuards(AuthGuard) works without AuthModule.exports because Nest
 instantiates the guard where it is used, and global JwtModule already
 provides JwtService.
+
+
+================================================================================
+END OF NOTES
+================================================================================
+
+
+================================================================================
+29. MIDDLEWARE - GLOBAL vs SPECIFIC ROUTE + MIDDLEWARE vs GUARD
+================================================================================
+
+What is middleware?
+- A function that runs BEFORE the route handler (controller).
+- Has access to req, res, next.
+- Good for: logging, request timing, attaching request id, raw body checks.
+
+Example middleware in project:
+File: src/common/middlewares/logger.middleware.ts
+
+export class LoggerMiddleware implements NestMiddleware {
+  use(req: Request, res: Response, next: NextFunction) {
+    console.log('Request...', req.method, req.url);
+    next();   // MUST call next() or request hangs
+  }
+}
+
+
+--------------------------------------------------------------------------------
+WAY 1: APPLY MIDDLEWARE GLOBALLY (all routes) - in main.ts
+--------------------------------------------------------------------------------
+
+For a FUNCTION middleware, use app.use() in main.ts:
+
+// main.ts
+import { logger } from './common/middlewares/logger.function';
+
+app.use(logger);   // runs for every request in the whole app
+
+Note: app.use() only accepts function middleware, not class with DI.
+
+
+--------------------------------------------------------------------------------
+WAY 2: APPLY MIDDLEWARE GLOBALLY via AppModule
+--------------------------------------------------------------------------------
+
+// app.module.ts
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+    consumer.apply(LoggerMiddleware).forRoutes('*');   // ALL routes
+  }
+}
+
+'*' = every path in the application.
+
+
+--------------------------------------------------------------------------------
+WAY 3: APPLY MIDDLEWARE TO SPECIFIC ROUTE / CONTROLLER
+--------------------------------------------------------------------------------
+
+// todo.module.ts
+export class TodoModule implements NestModule {
+  configure(consumer: MiddlewareConsumer) {
+
+    // (a) by controller  -> only TodoController routes (/todo/...)
+    consumer.apply(LoggerMiddleware).forRoutes(TodoController);
+
+    // (b) by path string -> paths under /todo
+    consumer.apply(LoggerMiddleware).forRoutes('todo');
+
+    // (c) by path + method
+    consumer.apply(LoggerMiddleware).forRoutes({
+      path: 'todo/create/:userId',
+      method: RequestMethod.POST,
+    });
+
+    // (d) exclude some routes
+    consumer
+      .apply(LoggerMiddleware)
+      .exclude({ path: 'todo/health', method: RequestMethod.GET })
+      .forRoutes(TodoController);
+  }
+}
+
+
+--------------------------------------------------------------------------------
+Q&A: I configured middleware ONLY in TodoModule with forRoutes('*'),
+     why does it log for UserModule routes too (Request... GET /) ?
+--------------------------------------------------------------------------------
+
+A: Because '*' matches ALL paths in the ENTIRE app, not just that module.
+
+Key point:
+- Middleware scope is decided by the forRoutes() ARGUMENT.
+- It is NOT auto-limited to the module where you wrote configure().
+- Writing it inside TodoModule does NOT restrict it to /todo routes.
+
+So forRoutes('*') in ANY module = effectively GLOBAL (every route).
+
+To limit to that module only:
+  forRoutes(TodoController)   // only /todo routes
+  forRoutes('todo')          // only /todo paths
+
+| forRoutes(...)     | Scope                          |
+|--------------------|--------------------------------|
+| '*'                | Every route in the whole app   |
+| TodoController     | Only that controller's routes  |
+| 'todo'             | Only paths under /todo         |
+| { path, method }   | Specific path + HTTP method    |
+
+RULE:
+Middleware placement (which module) does NOT scope it.
+The forRoutes() value scopes it. '*' = global.
+
+
+--------------------------------------------------------------------------------
+Q&A: DIFFERENCE BETWEEN MIDDLEWARE AND GUARD
+--------------------------------------------------------------------------------
+
+Both run BEFORE the controller, but they have different jobs.
+
+MIDDLEWARE:
+- Runs FIRST in the request lifecycle (before guards).
+- Generic request processing: logging, cors, body parsing, request id.
+- Does NOT know which controller/handler will run (no route metadata).
+- Cannot read @SetMetadata / decorators like @Public easily.
+- Signature: use(req, res, next) -> must call next().
+- Express-style. Not aware of Nest execution context details.
+
+GUARD:
+- Runs AFTER middleware, BEFORE interceptors/pipes/handler.
+- Purpose: AUTHORIZATION / access control (allow or deny request).
+- Returns true (allow) or false / throws (deny -> 403/401).
+- Has ExecutionContext -> knows handler + class.
+- Can use Reflector to read metadata (e.g. @Public(), @Roles()).
+- Signature: canActivate(context) -> boolean | Promise<boolean>.
+
+
+REQUEST LIFECYCLE ORDER:
+Incoming request
+  -> Middleware
+  -> Guards
+  -> Interceptors (before)
+  -> Pipes (validation/transform)
+  -> Route handler (controller)
+  -> Interceptors (after)
+  -> Response
+
+
+COMPARISON TABLE:
+
+| Feature              | Middleware              | Guard                       |
+|----------------------|-------------------------|-----------------------------|
+| Main purpose         | Generic pre-processing  | Authorization (allow/deny)  |
+| Runs when            | First                   | After middleware            |
+| Return value         | none (calls next())     | boolean / throws            |
+| Knows route handler? | No                      | Yes (ExecutionContext)      |
+| Read decorators?     | No (hard)               | Yes (Reflector)             |
+| Typical use          | Logging, request id     | JWT auth, roles, @Public    |
+| Signature            | use(req,res,next)       | canActivate(context)        |
+
+
+WHEN TO USE WHICH:
+- Need to log every request / add request id      -> Middleware
+- Need to allow/block based on token/role          -> Guard
+- Need @Public() or @Roles() logic                 -> Guard (uses Reflector)
+
+
+ONE-LINE SUMMARY:
+Middleware = generic code that runs before everything (logging etc.),
+scoped by forRoutes() ('*' = global).
+Guard = decides if a request is allowed (auth/roles), runs after middleware
+and can read route metadata.
 
 
 ================================================================================
