@@ -24,6 +24,7 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   27    -> Failed migration recovery (local vs production)
   28    -> AuthGuard without exports (why @UseGuards still works)
   29    -> Middleware (global vs specific route) + middleware vs guard
+  30    -> Custom exception filter (global error handler)
   (also see DTO class vs interface section above section 13)
 
 
@@ -2663,6 +2664,185 @@ Middleware = generic code that runs before everything (logging etc.),
 scoped by forRoutes() ('*' = global).
 Guard = decides if a request is allowed (auth/roles), runs after middleware
 and can read route metadata.
+
+
+================================================================================
+END OF NOTES
+================================================================================
+
+
+================================================================================
+30. CUSTOM EXCEPTION FILTER (GLOBAL ERROR HANDLER)
+================================================================================
+
+What is an exception filter?
+- Special class that CATCHES errors thrown anywhere in the app.
+- Lets you control the SHAPE of the error response (consistent JSON).
+- Runs at the very END of the request lifecycle (when an error is thrown).
+
+
+--------------------------------------------------------------------------------
+WHY USE IT?
+--------------------------------------------------------------------------------
+
+Without a filter, different errors return different shapes.
+With a filter, EVERY error returns the same JSON, e.g.:
+
+{
+  "success": false,
+  "statusCode": 404,
+  "message": "User not found",
+  "path": "/users/99",
+  "timestamp": "2026-07-17T10:00:00.000Z"
+}
+
+
+--------------------------------------------------------------------------------
+THE CODE
+--------------------------------------------------------------------------------
+
+File: src/common/filters/http-exception.filter.ts
+
+import {
+  ArgumentsHost,
+  Catch,
+  ExceptionFilter,
+  HttpException,
+  HttpStatus,
+  Logger,
+} from '@nestjs/common';
+import { Request, Response } from 'express';
+
+@Catch()   // empty @Catch() = catch ALL exceptions
+export class AllExceptionsFilter implements ExceptionFilter {
+  private readonly logger = new Logger(AllExceptionsFilter.name);
+
+  catch(exception: unknown, host: ArgumentsHost) {
+    const ctx = host.switchToHttp();
+    const response = ctx.getResponse<Response>();
+    const request = ctx.getRequest<Request>();
+
+    // If it's an HttpException use its status, else 500
+    const status =
+      exception instanceof HttpException
+        ? exception.getStatus()
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    let message: string | string[] = 'Internal server error';
+
+    if (exception instanceof HttpException) {
+      const res = exception.getResponse();
+      message =
+        typeof res === 'string'
+          ? res
+          : ((res as Record<string, any>).message ?? exception.message);
+    } else if (exception instanceof Error) {
+      message = exception.message;
+    }
+
+    this.logger.error(
+      `${request.method} ${request.url} ${status} - ${JSON.stringify(message)}`,
+    );
+
+    response.status(status).json({
+      success: false,
+      statusCode: status,
+      message,
+      path: request.url,
+      timestamp: new Date().toISOString(),
+    });
+  }
+}
+
+
+--------------------------------------------------------------------------------
+REGISTER IT GLOBALLY (main.ts)
+--------------------------------------------------------------------------------
+
+import { AllExceptionsFilter } from './common/filters/http-exception.filter';
+
+app.useGlobalFilters(new AllExceptionsFilter());
+
+Now every thrown error in the app goes through this filter.
+
+
+--------------------------------------------------------------------------------
+@Catch() - CATCH ALL vs SPECIFIC
+--------------------------------------------------------------------------------
+
+@Catch()                 -> catches EVERYTHING (HttpException + unknown errors)
+@Catch(HttpException)    -> catches only HttpException
+@Catch(PrismaClientKnownRequestError)  -> catch specific error type
+
+Example specific filter:
+@Catch(HttpException)
+export class HttpExceptionFilter implements ExceptionFilter { ... }
+
+
+--------------------------------------------------------------------------------
+HOW ERRORS ARE THROWN IN CODE (recap)
+--------------------------------------------------------------------------------
+
+Built-in Nest exceptions (recommended):
+  throw new NotFoundException('User not found');       // 404
+  throw new BadRequestException('Invalid data');       // 400
+  throw new UnauthorizedException();                   // 401
+  throw new ConflictException('Email already exists'); // 409
+  throw new ForbiddenException();                      // 403
+
+All of these are caught by the filter and formatted consistently.
+
+
+--------------------------------------------------------------------------------
+LEVELS OF REGISTERING A FILTER
+--------------------------------------------------------------------------------
+
+| Level      | How                                            | Scope          |
+|------------|------------------------------------------------|----------------|
+| Global     | app.useGlobalFilters(new AllExceptionsFilter())| whole app      |
+| Controller | @UseFilters(AllExceptionsFilter) on class      | one controller |
+| Method     | @UseFilters(AllExceptionsFilter) on handler    | one route      |
+
+Method/controller example:
+import { UseFilters } from '@nestjs/common';
+
+@UseFilters(AllExceptionsFilter)
+@Get(':id')
+findOne() { ... }
+
+
+--------------------------------------------------------------------------------
+WHERE FILTER SITS IN REQUEST LIFECYCLE
+--------------------------------------------------------------------------------
+
+Request
+  -> Middleware
+  -> Guards
+  -> Interceptors (before)
+  -> Pipes
+  -> Route handler (controller/service)
+       |
+       | (if error thrown anywhere above)
+       v
+  -> EXCEPTION FILTER  -> formatted error response
+
+
+--------------------------------------------------------------------------------
+FILTER vs GUARD vs MIDDLEWARE (quick)
+--------------------------------------------------------------------------------
+
+Middleware -> runs before, generic pre-processing (logging)
+Guard      -> allow/deny request (auth)
+Filter     -> catches errors and formats the error response
+
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+An exception filter with @Catch() catches all thrown errors and returns a
+consistent JSON error shape. Register globally with app.useGlobalFilters(),
+or per controller/route with @UseFilters().
 
 
 ================================================================================
