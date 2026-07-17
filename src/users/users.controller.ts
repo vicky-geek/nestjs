@@ -4,6 +4,7 @@ import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { ActivityService } from './activity/activity.service';
 import { AuthGuard } from 'src/auth/authGouard';
+import { AddProfileDto } from './dto/create-user.dto';
 
 
 @Controller('users')
@@ -54,5 +55,11 @@ export class UsersController {
   @Get(':userId/activity1')
   getActivity(@Param('userId') userId: string) {
     return this.activityService.findAll();
+  }
+
+  @UseGuards(AuthGuard) 
+  @Post('add-profile/:id')
+  async addProfile(@Param('id') id: string, @Body() addProfileDto: AddProfileDto) {
+    return await this.usersService.addProfile(id, addProfileDto);
   }
 }

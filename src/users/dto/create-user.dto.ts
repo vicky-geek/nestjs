@@ -21,3 +21,15 @@ export class CreateUserDto {
 //     email: string;
 //     password: string;
 //   }
+
+
+
+export class AddProfileDto {
+  @IsString()
+  @IsNotEmpty()
+  bio: string;
+
+  @IsString()
+  @IsNotEmpty()
+  avatar: string;
+}

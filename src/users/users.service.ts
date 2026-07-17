@@ -1,5 +1,5 @@
-import { Injectable } from '@nestjs/common';
-import { CreateUserDto } from './dto/create-user.dto';
+import { Injectable, NotFoundException } from '@nestjs/common';
+import { AddProfileDto, CreateUserDto } from './dto/create-user.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { PrismaService } from '../prisma/prisma.service';
 @Injectable()
@@ -39,5 +39,23 @@ export class UsersService {
 
   remove(id: number) {
     return `This action removes a #${id} user`;
+  }
+
+  async addProfile(id: string, addProfileDto: AddProfileDto) {
+    const user = await this.findOne(+id);
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+    const profile = await this.prisma.profile.create({
+      data: {
+        ...addProfileDto,
+        user: {
+          connect: {
+            id: user.id,
+          },
+        },
+      },
+    });
+    return profile;
   }
 }

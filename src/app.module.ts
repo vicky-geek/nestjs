@@ -5,9 +5,10 @@ import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { GmailModule } from './gmail/gmail.module';
 import { PrismaModule } from './prisma/prisma.module';
+import { TodoModule } from './todo/todo.module';
 
 @Module({
-  imports: [PrismaModule, AuthModule, UsersModule, GmailModule],
+  imports: [PrismaModule, AuthModule, UsersModule, GmailModule, TodoModule],
   controllers: [AppController],
   providers: [AppService],
 })
