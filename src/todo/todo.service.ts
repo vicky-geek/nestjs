@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { CreateTodoDto } from './dto/createTodo';
 import { PrismaService } from 'src/prisma/prisma.service';
 
@@ -6,6 +6,7 @@ import { PrismaService } from 'src/prisma/prisma.service';
 export class TodoService {
     constructor(private readonly prisma: PrismaService) {}
     async createTodo(userId: number, createTodoDto: CreateTodoDto) {
+        try {
         console.log('createTodo', userId, createTodoDto);
         const user = await this.prisma.user.findUnique({
             where: {
@@ -22,8 +23,9 @@ export class TodoService {
                 tags: {
                     create: createTodoDto.tags.map(tag => ({
                         tag: {
-                            connect: {
-                                name: tag,
+                            connectOrCreate: {
+                                where: { name: tag },
+                                create: { name: tag },
                             },
                         }, 
                     })),
@@ -34,6 +36,10 @@ export class TodoService {
                     },
                 },
             },
-        });
+        }); 
+        } catch (error) {
+            console.log('error=>', error);
+            throw new BadRequestException('Failed to create todo');
+        }
     }
 }   

@@ -1,9 +1,21 @@
+// gmail.service.ts
+
 import { Injectable } from '@nestjs/common';
+import { EmailService } from './email.service';
 
 @Injectable()
-export class GmailService {
-    sendEmail(email: string) {
-        console.log("email=>", email);
-        return {"message": "Email sent successfully","data":[{"id":1,"email":email}]};
-    }
+export class GmailService extends EmailService {
+
+  async sendEmail(
+    to: string,
+    subject: string,
+    body: string,
+  ) {
+
+    console.log('Sending real email using Gmail...');
+
+    // Nodemailer logic here
+
+  }
+
 }

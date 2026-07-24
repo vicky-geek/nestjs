@@ -21,6 +21,7 @@ export class PrismaService
     const adapter = new PrismaPg(pool);
     super({ adapter });
     this.pool = pool;
+    console.log('PrismaService initialized');
   }
 
   async onModuleInit() {

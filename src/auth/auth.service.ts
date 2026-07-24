@@ -1,5 +1,5 @@
 import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
-import { GmailService } from '../gmail/gmail.service';
+import { EmailService } from '../gmail/email.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { JwtService } from '@nestjs/jwt';
@@ -9,7 +9,7 @@ import * as bcrypt from 'bcrypt';
 @Injectable()
 export class AuthService {
   constructor(
-    private readonly gmailService: GmailService,
+    private readonly EmailService: EmailService,
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
   ) {}
@@ -37,7 +37,7 @@ export class AuthService {
     console.log("refreshToken=>", refreshToken);
 
 
-    const emailResult = this.gmailService.sendEmail(user.email);
+    const emailResult = await this.EmailService.sendEmail(user.email, 'Welcome to our app', 'Thank you for registering!');
 
     return {
       message: 'User registered successfully',
@@ -66,10 +66,10 @@ export class AuthService {
     if (!isPasswordValid) {
       throw new UnauthorizedException('Invalid email or password');
     }
-
-    const token = await this.jwtService.signAsync({ email: user.email });
+    console.log("user=>", user);
+    const token = await this.jwtService.signAsync({ email: user.email, role: user.role });
     const refreshToken = await this.jwtService.signAsync(
-      { email: user.email },
+      { email: user.email, role: user.role },
       { secret: process.env.JWT_REFRESH_SECRET, expiresIn: '7d' },
     );
 

@@ -26,6 +26,15 @@ export class UsersService {
       where: {
         id: id,
         },
+        include: {
+          profile: true,
+          todos: {
+            include: {
+              tags: {include: {tag: true}},
+              comments: true,
+            },
+          },
+        },
       });
       return user;
     } catch (error) {
