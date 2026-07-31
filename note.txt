@@ -27,6 +27,7 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   30    -> Custom exception filter (global error handler)
   31    -> AuthGuard + AuthorizationGuard without exports in TodoModule
   32    -> Docker: copy package.json first + build inside image + multi-stage
+  33    -> Custom decorator + Reflector in RBAC (@Roles)
   (also see DTO class vs interface section above section 13)
 
 
@@ -4236,6 +4237,197 @@ ONE-LINE SUMMARY
 Copy package.json first so npm install is cached when only source changes.
 Build inside Docker so everyone uses the same Node/OS.
 Use multi-stage builds for smaller production images.
+
+
+================================================================================
+END OF NOTES
+================================================================================
+
+
+================================================================================
+33. CUSTOM DECORATOR + REFLECTOR IN RBAC
+================================================================================
+
+RBAC = Role Based Access Control
+Example: only ADMIN can create todo.
+
+In your project:
+  @Roles('admin')                  <- custom decorator (stores metadata)
+  @UseGuards(AuthGuard, AuthorizationGuard)
+  AuthorizationGuard uses Reflector <- reads that metadata
+
+
+--------------------------------------------------------------------------------
+WHAT IS A CUSTOM DECORATOR?
+--------------------------------------------------------------------------------
+
+A custom decorator is a function you create to attach EXTRA DATA (metadata)
+to a class or method.
+
+NestJS helper: SetMetadata(key, value)
+
+Your Roles decorator:
+File: src/roles/roles.decorator.ts
+
+  export const ROLES_KEY = 'roles';
+
+  export const Roles = (...args: string[]) => {
+    return SetMetadata(ROLES_KEY, args);
+  };
+
+Usage on route:
+  @Roles('admin')
+  @Post('create/:userId')
+  createTodo() { ... }
+
+What SetMetadata does:
+  Stores metadata on the route handler:
+    key   = 'roles'
+    value = ['admin']
+
+It does NOT check roles by itself.
+It only LABELS the route with required roles.
+
+
+--------------------------------------------------------------------------------
+WHAT IS REFLECTOR?
+--------------------------------------------------------------------------------
+
+Reflector is a NestJS utility that READS metadata set by decorators
+like SetMetadata / @Roles / @Public.
+
+In AuthorizationGuard:
+
+  constructor(private readonly reflector: Reflector) {}
+
+  const requiredRoles = this.reflector.getAllAndOverride<string[]>(
+    ROLES_KEY,
+    [
+      context.getHandler(),  // method level metadata (@Roles on createTodo)
+      context.getClass(),    // controller level metadata (@Roles on class)
+    ],
+  );
+
+getAllAndOverride:
+  - checks method first, then class
+  - method metadata overrides class metadata
+
+Example results:
+  @Roles('admin') on method -> requiredRoles = ['admin']
+  no @Roles()              -> requiredRoles = undefined
+
+
+--------------------------------------------------------------------------------
+HOW THEY WORK TOGETHER IN RBAC (FULL FLOW)
+--------------------------------------------------------------------------------
+
+1) Developer marks route:
+   @Roles('admin')
+   -> SetMetadata('roles', ['admin']) stores metadata on handler
+
+2) Request comes in with JWT:
+   Authorization: Bearer <token>
+
+3) AuthGuard runs FIRST:
+   - verifies token
+   - sets request.user = { email, role: 'ADMIN', ... }
+
+4) AuthorizationGuard runs SECOND:
+   - Reflector reads requiredRoles from @Roles metadata
+   - reads user.role from request.user
+   - compares them
+
+5) Decision:
+   - if user.role matches required role -> allow (return true)
+   - else throw ForbiddenException (403)
+
+
+Your AuthorizationGuard logic (simplified):
+
+  const requiredRoles = this.reflector.getAllAndOverride(...);
+
+  if (!requiredRoles) return true;   // no role required
+
+  const user = request.user;
+  if (!user) throw new ForbiddenException('User not authenticated');
+
+  const hasRole = requiredRoles.some(
+    (role) => role.toUpperCase() === String(user.role).toUpperCase(),
+  );
+
+  if (!hasRole) {
+    throw new ForbiddenException('Access denied');
+  }
+
+  return true;
+
+
+--------------------------------------------------------------------------------
+WHY BOTH ARE NEEDED
+--------------------------------------------------------------------------------
+
+| Piece              | Job                                      |
+|--------------------|------------------------------------------|
+| @Roles('admin')    | Declares REQUIRED roles on the route     |
+| SetMetadata        | Stores that declaration as metadata      |
+| Reflector          | Reads metadata at runtime in the guard   |
+| AuthorizationGuard | Compares required role vs user.role      |
+| AuthGuard          | Ensures user is logged in + sets user    |
+
+Without decorator:
+  Guard does not know which roles this route needs.
+
+Without Reflector:
+  Guard cannot read the metadata stored by @Roles.
+
+
+--------------------------------------------------------------------------------
+MENTAL MODEL
+--------------------------------------------------------------------------------
+
+  @Roles('admin')
+       |
+       v
+  SetMetadata('roles', ['admin'])   <- WRITE metadata
+       |
+       v
+  Reflector.getAllAndOverride(...)  <- READ metadata
+       |
+       v
+  AuthorizationGuard compares with request.user.role
+       |
+       v
+  allow / 403 Forbidden
+
+
+--------------------------------------------------------------------------------
+COMMON MISTAKES
+--------------------------------------------------------------------------------
+
+1. Using only AuthorizationGuard without AuthGuard
+   -> request.user is missing -> Forbidden
+
+2. JWT payload does not include role
+   -> login/register must put role in token:
+      jwt.signAsync({ email, role: user.role })
+
+3. Role case mismatch
+   -> DB has ADMIN, decorator has 'admin'
+   -> compare with toUpperCase() (your guard already does this)
+
+4. Wrong guard order
+   -> Always: @UseGuards(AuthGuard, AuthorizationGuard)
+   -> Auth first, then role check
+
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+Custom decorator (@Roles) stores required roles as metadata.
+Reflector reads that metadata in AuthorizationGuard.
+Together they implement RBAC: route says who is allowed,
+guard checks if the logged-in user's role matches.
 
 
 ================================================================================
