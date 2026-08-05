@@ -28,6 +28,7 @@ REVISION INDEX (Q&A sections marked with "Q&A"):
   31    -> AuthGuard + AuthorizationGuard without exports in TodoModule
   32    -> Docker: copy package.json first + build inside image + multi-stage
   33    -> Custom decorator + Reflector in RBAC (@Roles)
+  34    -> NestJS lifecycle hooks (constructor first + enableShutdownHooks)
   (also see DTO class vs interface section above section 13)
 
 
@@ -4428,6 +4429,236 @@ Custom decorator (@Roles) stores required roles as metadata.
 Reflector reads that metadata in AuthorizationGuard.
 Together they implement RBAC: route says who is allowed,
 guard checks if the logged-in user's role matches.
+
+
+================================================================================
+END OF NOTES
+================================================================================
+
+
+================================================================================
+34. NESTJS LIFECYCLE HOOKS
+================================================================================
+
+Lifecycle hooks are special methods NestJS calls automatically at certain
+moments during app start and app stop.
+
+Use them for:
+  - connect DB / Redis / queues on start
+  - disconnect / close connections on stop
+  - warm cache
+  - log startup/shutdown
+  - cleanup timers, sockets, file handles
+
+
+--------------------------------------------------------------------------------
+IMPORTANT: CONSTRUCTOR RUNS FIRST
+--------------------------------------------------------------------------------
+
+For every provider/controller Nest creates:
+
+1) constructor()               <- FIRST (always)
+2) then lifecycle hooks        <- later
+
+Example order for one service:
+
+  constructor()
+  onModuleInit()
+  onApplicationBootstrap()
+  ... app is running ...
+  onModuleDestroy()
+  beforeApplicationShutdown()
+  onApplicationShutdown()
+
+Constructor:
+  - inject dependencies
+  - set initial values
+  - create objects (like pg Pool)
+
+Do NOT do heavy async work in constructor
+(DB connect, HTTP calls). Use onModuleInit() instead.
+
+Your PrismaService example:
+File: src/prisma/prisma.service.ts
+
+  constructor() {
+    // create Pool + adapter (sync setup)
+  }
+
+  async onModuleInit() {
+    await this.$connect();   // actual DB connect (async)
+  }
+
+  async onModuleDestroy() {
+    await this.$disconnect();
+    await this.pool.end();
+  }
+
+
+--------------------------------------------------------------------------------
+ALL LIFECYCLE HOOKS (STARTUP)
+--------------------------------------------------------------------------------
+
+1) constructor()
+   - Not a Nest interface, but always first
+   - Nest creates class instance and injects deps
+   - Runs for every module's providers/controllers as Nest instantiates them
+
+2) onModuleInit()
+   Interface: OnModuleInit
+   Method: onModuleInit()
+   When: after THIS module's dependencies are resolved and the module is initialized
+   Use: connect DB, register listeners, load config into memory
+
+   export class PrismaService implements OnModuleInit {
+     async onModuleInit() {
+       await this.$connect();
+     }
+   }
+
+3) onApplicationBootstrap()
+   Interface: OnApplicationBootstrap
+   Method: onApplicationBootstrap()
+   When: after ALL modules have been initialized
+   Use: work that needs the whole app ready (warmup, health checks, start jobs)
+
+
+--------------------------------------------------------------------------------
+ALL LIFECYCLE HOOKS (SHUTDOWN / DESTROY)
+--------------------------------------------------------------------------------
+
+4) onModuleDestroy()
+   Interface: OnModuleDestroy
+   Method: onModuleDestroy()
+   When: module is being destroyed (app shutting down)
+   Use: close DB connections for that module
+
+5) beforeApplicationShutdown(signal?: string)
+   Interface: BeforeApplicationShutdown
+   Method: beforeApplicationShutdown(signal?: string)
+   When: after onModuleDestroy, before final shutdown
+   Use: last chance cleanup, flush logs, wait for pending requests
+
+6) onApplicationShutdown(signal?: string)
+   Interface: OnApplicationShutdown
+   Method: onApplicationShutdown(signal?: string)
+   When: final shutdown hook
+   Use: final cleanup, log "app stopped"
+
+
+--------------------------------------------------------------------------------
+CRITICAL: DESTROY HOOKS NEED enableShutdownHooks()
+--------------------------------------------------------------------------------
+
+By default, Nest DOES NOT listen to process kill signals.
+So onModuleDestroy / beforeApplicationShutdown / onApplicationShutdown
+may NOT run on Ctrl+C or SIGTERM unless you enable them.
+
+In main.ts:
+
+  async function bootstrap() {
+    const app = await NestFactory.create(AppModule);
+
+    app.enableShutdownHooks();   // REQUIRED for destroy hooks
+
+    await app.listen(process.env.PORT ?? 3000);
+  }
+
+Without this:
+  - constructor / onModuleInit / onApplicationBootstrap still work on start
+  - destroy hooks often DO NOT run on process stop
+
+With this:
+  Nest listens to signals like SIGTERM / SIGINT (Ctrl+C)
+  and calls destroy hooks in order.
+
+
+--------------------------------------------------------------------------------
+FULL ORDER SUMMARY
+--------------------------------------------------------------------------------
+
+START:
+  1. constructor()                  (for each provider as Nest creates it)
+  2. onModuleInit()
+  3. onApplicationBootstrap()
+  4. app.listen() / app ready
+
+STOP (only if enableShutdownHooks is on):
+  5. onModuleDestroy()
+  6. beforeApplicationShutdown(signal)
+  7. onApplicationShutdown(signal)
+
+
+--------------------------------------------------------------------------------
+EXAMPLE SERVICE WITH ALL HOOKS
+--------------------------------------------------------------------------------
+
+import {
+  Injectable,
+  OnModuleInit,
+  OnModuleDestroy,
+  OnApplicationBootstrap,
+  BeforeApplicationShutdown,
+  OnApplicationShutdown,
+} from '@nestjs/common';
+
+@Injectable()
+export class AppLifecycleService
+  implements
+    OnModuleInit,
+    OnApplicationBootstrap,
+    OnModuleDestroy,
+    BeforeApplicationShutdown,
+    OnApplicationShutdown
+{
+  constructor() {
+    console.log('1) constructor');
+  }
+
+  onModuleInit() {
+    console.log('2) onModuleInit');
+  }
+
+  onApplicationBootstrap() {
+    console.log('3) onApplicationBootstrap');
+  }
+
+  onModuleDestroy() {
+    console.log('4) onModuleDestroy');
+  }
+
+  beforeApplicationShutdown(signal?: string) {
+    console.log('5) beforeApplicationShutdown', signal);
+  }
+
+  onApplicationShutdown(signal?: string) {
+    console.log('6) onApplicationShutdown', signal);
+  }
+}
+
+
+--------------------------------------------------------------------------------
+WHEN TO USE WHICH (QUICK)
+--------------------------------------------------------------------------------
+
+| Hook                        | Typical use                              |
+|-----------------------------|------------------------------------------|
+| constructor                 | Inject deps, create objects              |
+| onModuleInit                | Connect DB / Redis / queues              |
+| onApplicationBootstrap      | Warm cache after all modules ready       |
+| onModuleDestroy             | Disconnect DB / close module resources   |
+| beforeApplicationShutdown   | Flush logs, finish pending work          |
+| onApplicationShutdown       | Final cleanup / stop log                 |
+
+
+--------------------------------------------------------------------------------
+ONE-LINE SUMMARY
+--------------------------------------------------------------------------------
+
+Constructor always runs first when Nest creates each class.
+Use onModuleInit for async startup work (like Prisma $connect).
+Destroy hooks need app.enableShutdownHooks() in main.ts or they
+may not run on Ctrl+C / SIGTERM.
 
 
 ================================================================================
